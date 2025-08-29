@@ -8,67 +8,46 @@ import { revalidatePath } from "next/cache";
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
-export async function saveResume(content) {
-  const { userId } = await auth();
-  if (!userId) throw new Error("Unauthorized");
+async function getUserFromAuth() {
+  const { userId } = auth(); // no await needed for Clerk server-side
+  if (!userId) return null;
 
   const user = await db.user.findUnique({
     where: { clerkUserId: userId },
   });
 
-  if (!user) throw new Error("User not found");
-
-  try {
-    const resume = await db.resume.upsert({
-      where: {
-        userId: user.id,
-      },
-      update: {
-        content,
-      },
-      create: {
-        userId: user.id,
-        content,
-      },
-    });
-
-    revalidatePath("/resume");
-    return resume;
-  } catch (error) {
-    console.error("Error saving resume:", error);
-    throw new Error("Failed to save resume");
-  }
+  return user;
 }
 
-export async function getResume() {
-  const { userId } = await auth();
-  if (!userId) throw new Error("Unauthorized");
+// Save resume
+export async function saveResume(content) {
+  const user = await getUserFromAuth();
+  if (!user) return null; // user not signed in
 
-  const user = await db.user.findUnique({
-    where: { clerkUserId: userId },
+  const resume = await db.resume.upsert({
+    where: { userId: user.id },
+    update: { content },
+    create: { userId: user.id, content },
   });
 
-  if (!user) throw new Error("User not found");
+  revalidatePath("/resume");
+  return resume;
+}
+
+// Get resume
+export async function getResume() {
+  const user = await getUserFromAuth();
+  if (!user) return null; // handle gracefully
 
   return await db.resume.findUnique({
-    where: {
-      userId: user.id,
-    },
+    where: { userId: user.id },
   });
 }
 
+// Improve with AI
 export async function improveWithAI({ current, type }) {
-  const { userId } = await auth();
-  if (!userId) throw new Error("Unauthorized");
-
-  const user = await db.user.findUnique({
-    where: { clerkUserId: userId },
-    include: {
-      industryInsight: true,
-    },
-  });
-
-  if (!user) throw new Error("User not found");
+  const user = await getUserFromAuth();
+  if (!user) return null;
 
   const prompt = `
     As an expert resume writer, improve the following ${type} description for a ${user.industry} professional.
@@ -82,17 +61,15 @@ export async function improveWithAI({ current, type }) {
     4. Keep it concise but detailed
     5. Focus on achievements over responsibilities
     6. Use industry-specific keywords
-    
+
     Format the response as a single paragraph without any additional text or explanations.
   `;
 
   try {
     const result = await model.generateContent(prompt);
-    const response = result.response;
-    const improvedContent = response.text().trim();
-    return improvedContent;
+    return result.response.text().trim();
   } catch (error) {
     console.error("Error improving content:", error);
-    throw new Error("Failed to improve content");
+    return current; // fallback to current content
   }
 }
